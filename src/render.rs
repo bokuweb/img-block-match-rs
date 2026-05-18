@@ -1,5 +1,26 @@
-use crate::block_match::{BidirectionalDiff, BlockMatchResult};
+use crate::block_match::{BidirectionalDiff, BlockMatchResult, Region};
 use image::{Rgba, RgbaImage};
+
+/// Draws axis-aligned bounding-box outlines (1-pixel stroke) around each
+/// region onto `img` in place.
+pub fn draw_regions(img: &mut RgbaImage, regions: &[Region], color: [u8; 4]) {
+    let c = Rgba(color);
+    let (iw, ih) = (img.width(), img.height());
+    for r in regions {
+        let x1 = r.x.min(iw.saturating_sub(1));
+        let y1 = r.y.min(ih.saturating_sub(1));
+        let x2 = (r.x + r.width).min(iw).saturating_sub(1);
+        let y2 = (r.y + r.height).min(ih).saturating_sub(1);
+        for x in x1..=x2 {
+            img.put_pixel(x, y1, c);
+            img.put_pixel(x, y2, c);
+        }
+        for y in y1..=y2 {
+            img.put_pixel(x1, y, c);
+            img.put_pixel(x2, y, c);
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct RenderOptions {

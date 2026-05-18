@@ -17,6 +17,6 @@ pub mod render;
 
 pub use block_match::{
     diff, diff_bidirectional, BidirectionalDiff, BlockMatchOptions, BlockMatchResult,
-    MotionVector, SearchMode,
+    MotionVector, Region, SearchMode,
 };
-pub use render::{render_bidirectional, render_diff, RenderOptions};
+pub use render::{draw_regions, render_bidirectional, render_diff, RenderOptions};

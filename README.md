@@ -130,6 +130,42 @@ cargo run --release -- expected.png actual.png \
 - `--mode fast` for the hierarchical search (recommended once the search
   radius gets large).
 
+## Region clustering (for tooling)
+
+Raw block-level results are great for visualization but awkward to consume
+programmatically. `BlockMatchResult::unmatched_regions(merge_gap, min_blocks)`
+groups spatially-adjacent unmatched blocks into bounding rectangles via
+4-connected flood fill, with `merge_gap` blocks of dilation to bridge tight
+gaps and `min_blocks` to discard anti-aliasing noise.
+
+```rust
+let regions = result.unmatched_regions(/*merge_gap=*/ 2, /*min_blocks=*/ 2);
+for r in regions {
+    println!("{}x{} at ({}, {}) — {} blocks", r.width, r.height, r.x, r.y, r.block_count);
+}
+```
+
+CLI: `--regions` draws bounding boxes on the rendered image and `--json`
+emits region coordinates on stdout:
+
+```sh
+$ img-block-match assets/menu-before.png assets/menu-after.png \
+    --search-y 80 --block-size 8 --mode fast \
+    --regions --merge-gap 2 --min-blocks 2 --json \
+    -o assets/diff-menu-regions.png
+{
+    "removed": [
+      {"x": 80, "y": 72, "width": 48, "height": 16, "blocks": 10}
+    ],
+    "added": [
+      {"x": 72, "y": 72, "width": 64, "height": 16, "blocks": 14},
+      {"x": 16, "y": 280, "width": 72, "height": 16, "blocks": 14}
+    ]
+}
+```
+
+![regions](assets/diff-menu-regions.png)
+
 ## Search modes
 
 | mode | strategy | when to use |

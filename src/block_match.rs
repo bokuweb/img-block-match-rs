@@ -75,6 +75,17 @@ pub struct BlockMatchResult {
     pub vectors: Vec<MotionVector>,
 }
 
+/// Pixel-space axis-aligned bounding box of a cluster of unmatched blocks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Region {
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+    /// How many block-grid cells make up this cluster.
+    pub block_count: u32,
+}
+
 impl BlockMatchResult {
     pub fn get(&self, col: u32, row: u32) -> &MotionVector {
         &self.vectors[(row * self.cols + col) as usize]
@@ -83,6 +94,105 @@ impl BlockMatchResult {
     pub fn unmatched(&self) -> usize {
         self.vectors.iter().filter(|v| !v.matched).count()
     }
+
+    /// Groups spatially adjacent unmatched blocks into bounding rectangles
+    /// using 4-connected flood fill (with optional dilation to merge clusters
+    /// separated by `merge_gap` empty blocks).
+    ///
+    /// `min_blocks` discards tiny clusters (helps suppress isolated
+    /// false-positives on anti-aliased edges).
+    pub fn unmatched_regions(&self, merge_gap: u32, min_blocks: u32) -> Vec<Region> {
+        let cols = self.cols as i32;
+        let rows = self.rows as i32;
+        let bs = self.block_size;
+        let mut mask = vec![false; (cols * rows) as usize];
+        for (i, v) in self.vectors.iter().enumerate() {
+            if !v.matched {
+                mask[i] = true;
+            }
+        }
+
+        // Dilate the unmatched mask by `merge_gap` blocks so that nearby
+        // clusters get merged into one rectangle.
+        let mask = dilate(&mask, cols as u32, rows as u32, merge_gap);
+
+        let mut visited = vec![false; mask.len()];
+        let mut regions = Vec::new();
+        for y in 0..rows {
+            for x in 0..cols {
+                let idx = (y * cols + x) as usize;
+                if !mask[idx] || visited[idx] {
+                    continue;
+                }
+                // BFS for the connected component.
+                let mut stack = vec![(x, y)];
+                let mut min_x = i32::MAX;
+                let mut max_x = i32::MIN;
+                let mut min_y = i32::MAX;
+                let mut max_y = i32::MIN;
+                let mut count = 0u32;
+                while let Some((cx, cy)) = stack.pop() {
+                    let i = (cy * cols + cx) as usize;
+                    if visited[i] || !mask[i] {
+                        continue;
+                    }
+                    visited[i] = true;
+                    // The dilation halo is used only for connectivity; the
+                    // bounding box and block count come from the original
+                    // unmatched mask.
+                    if !self.vectors[i].matched {
+                        count += 1;
+                        if cx < min_x { min_x = cx; }
+                        if cx > max_x { max_x = cx; }
+                        if cy < min_y { min_y = cy; }
+                        if cy > max_y { max_y = cy; }
+                    }
+                    for (nx, ny) in [(cx - 1, cy), (cx + 1, cy), (cx, cy - 1), (cx, cy + 1)] {
+                        if nx >= 0 && nx < cols && ny >= 0 && ny < rows {
+                            stack.push((nx, ny));
+                        }
+                    }
+                }
+                if count < min_blocks.max(1) {
+                    continue;
+                }
+                regions.push(Region {
+                    x: min_x as u32 * bs,
+                    y: min_y as u32 * bs,
+                    width: (max_x - min_x + 1) as u32 * bs,
+                    height: (max_y - min_y + 1) as u32 * bs,
+                    block_count: count,
+                });
+            }
+        }
+        regions.sort_by_key(|r| (r.y, r.x));
+        regions
+    }
+}
+
+fn dilate(mask: &[bool], cols: u32, rows: u32, radius: u32) -> Vec<bool> {
+    if radius == 0 {
+        return mask.to_vec();
+    }
+    let r = radius as i32;
+    let mut out = vec![false; mask.len()];
+    for y in 0..rows as i32 {
+        for x in 0..cols as i32 {
+            if !mask[(y * cols as i32 + x) as usize] {
+                continue;
+            }
+            for dy in -r..=r {
+                let ny = y + dy;
+                if ny < 0 || ny >= rows as i32 { continue; }
+                for dx in -r..=r {
+                    let nx = x + dx;
+                    if nx < 0 || nx >= cols as i32 { continue; }
+                    out[(ny * cols as i32 + nx) as usize] = true;
+                }
+            }
+        }
+    }
+    out
 }
 
 #[inline]
@@ -388,6 +498,52 @@ mod tests {
         assert_eq!(mv.dy, 16);
         assert_eq!(mv.cost, 0);
         assert!(mv.matched);
+    }
+
+    #[test]
+    fn unmatched_regions_cluster_adjacent_blocks() {
+        // Build a 4x4 grid of "matched" blocks then forcibly mark a few
+        // unmatched. block_size=8 => image 32x32, grid 4x4.
+        let img = solid(32, 32, [255, 255, 255, 255]);
+        let mut result = diff(&img, &img, &BlockMatchOptions::default());
+        // Force two clusters: a 2x2 at top-left and a single block at (3,3).
+        // (Using default block_size=16 actually gives a 2x2 grid, so use
+        // explicit options.)
+        let opts = BlockMatchOptions {
+            block_size: 8,
+            ..Default::default()
+        };
+        result = diff(&img, &img, &opts);
+        for &(cx, cy) in &[(0u32, 0u32), (1, 0), (0, 1), (1, 1), (3, 3)] {
+            let i = (cy * result.cols + cx) as usize;
+            result.vectors[i].matched = false;
+        }
+        let regions = result.unmatched_regions(0, 1);
+        assert_eq!(regions.len(), 2);
+        assert_eq!(regions[0], Region { x: 0, y: 0, width: 16, height: 16, block_count: 4 });
+        assert_eq!(regions[1], Region { x: 24, y: 24, width: 8, height: 8, block_count: 1 });
+    }
+
+    #[test]
+    fn unmatched_regions_merge_with_gap() {
+        let img = solid(80, 16, [255, 255, 255, 255]);
+        let opts = BlockMatchOptions {
+            block_size: 8,
+            ..Default::default()
+        };
+        let mut result = diff(&img, &img, &opts);
+        // Two unmatched blocks separated by one matched block in the middle.
+        for &(cx, cy) in &[(0u32, 0u32), (2, 0)] {
+            let i = (cy * result.cols + cx) as usize;
+            result.vectors[i].matched = false;
+        }
+        // merge_gap=0 -> two regions.
+        assert_eq!(result.unmatched_regions(0, 1).len(), 2);
+        // merge_gap=1 -> dilation bridges the gap -> one region spanning both.
+        let merged = result.unmatched_regions(1, 1);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].x, 0);
+        assert_eq!(merged[0].width, 24);
     }
 
     #[test]
