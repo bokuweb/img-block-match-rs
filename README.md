@@ -166,6 +166,26 @@ $ img-block-match assets/menu-before.png assets/menu-after.png \
 
 ![regions](assets/diff-menu-regions.png)
 
+## Match confidence (opt-in)
+
+Setting `BlockMatchOptions::compute_confidence = true` (CLI: `--confidence`)
+also tracks the best spatially-distinct **runner-up** SAD for each block.
+The result is exposed as a normalized 0..=1 score:
+
+```rust
+mv.confidence()  // (second_cost - cost) / second_cost
+```
+
+- ≈ 1.0 — the winning displacement is uniquely good (text, edges, distinct
+  features).
+- ≈ 0.0 — many positions in the search window match equally well (flat
+  regions, repeating patterns) → the `(dx, dy)` vector is unreliable.
+
+Useful for downstream tools that want to discount spurious matches in
+uniform areas before treating a "matched" block as evidence of real content
+correspondence. Disables the early-return-on-perfect-match optimization, so
+expect a 2–6× slowdown depending on mode.
+
 ## Search modes
 
 | mode | strategy | when to use |

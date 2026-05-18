@@ -73,6 +73,11 @@ struct Args {
     /// to writing the rendered image).
     #[arg(long, default_value_t = false)]
     json: bool,
+    /// Also track a spatially-distinct runner-up SAD for each block so
+    /// MotionVector::confidence() returns a meaningful value. Disables the
+    /// early-return-on-perfect-match optimization; expect a notable slowdown.
+    #[arg(long, default_value_t = false)]
+    confidence: bool,
 }
 
 fn regions_to_json(label: &str, regions: &[Region]) -> String {
@@ -105,6 +110,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         step: args.step,
         threshold: args.threshold,
         mode: args.mode.into(),
+        compute_confidence: args.confidence,
     };
     let render_opts = RenderOptions {
         draw_vectors: args.draw_vectors,

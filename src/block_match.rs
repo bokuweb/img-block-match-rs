@@ -40,6 +40,12 @@ pub struct BlockMatchOptions {
     pub threshold: u32,
     /// Which search strategy to use within the window.
     pub mode: SearchMode,
+    /// When true, the search also tracks the best spatially-distinct
+    /// runner-up SAD so [`MotionVector::confidence`] is meaningful. Comes
+    /// at the cost of disabling the early-return-on-perfect-match
+    /// optimization, so prefer the default `false` for visualization-only
+    /// workflows.
+    pub compute_confidence: bool,
 }
 
 impl Default for BlockMatchOptions {
@@ -51,6 +57,7 @@ impl Default for BlockMatchOptions {
             step: 1,
             threshold: 8,
             mode: SearchMode::Full,
+            compute_confidence: false,
         }
     }
 }
@@ -61,8 +68,30 @@ pub struct MotionVector {
     pub dy: i32,
     /// Total SAD over the block (sum across R/G/B channels and all pixels).
     pub cost: u64,
+    /// Best SAD among candidates whose displacement differs from
+    /// `(dx, dy)` by more than the block size (i.e. the runner-up at a
+    /// spatially distinct location). `u64::MAX` if no such candidate was
+    /// evaluated. Use [`confidence`] to turn this into a 0..=1 score.
+    pub second_cost: u64,
     /// True if `cost` is at or below the per-block threshold.
     pub matched: bool,
+}
+
+impl MotionVector {
+    /// 0.0 = the best match is no better than other positions in the search
+    /// window (flat / repeating content — vector is unreliable);
+    /// 1.0 = the best match is strictly the only good one (high confidence).
+    pub fn confidence(&self) -> f32 {
+        if self.second_cost == u64::MAX {
+            return 1.0;
+        }
+        if self.second_cost == 0 {
+            return 0.0;
+        }
+        let c = self.cost as f64;
+        let s = self.second_cost as f64;
+        ((s - c) / s).clamp(0.0, 1.0) as f32
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -230,8 +259,10 @@ fn sad_block(
             let db = (r_buf[r_off + 2] as i32 - t_buf[t_off + 2] as i32).unsigned_abs() as u64;
             sum += dr + dg + db;
         }
-        // Early-out: this row already exceeded the current best.
-        if sum >= cutoff {
+        // Early-out: this row strictly exceeds the cutoff. Strict so that
+        // ties (equal-cost candidates at spatially distant locations) still
+        // run to completion and reach the second-best tracker.
+        if sum > cutoff {
             return sum;
         }
     }
@@ -264,13 +295,14 @@ pub fn diff(
                 let cx = rx as i32;
                 let cy = ry as i32;
 
-                let (best_dx, best_dy, best_cost) = match opts.mode {
+                let (best_dx, best_dy, best_cost, second_cost) = match opts.mode {
                     SearchMode::Full => search_full(
                         reference, target, rx, ry, cx, cy, block_size, search_x, search_y,
-                        step,
+                        step, opts.compute_confidence,
                     ),
                     SearchMode::Hierarchical => search_hierarchical(
                         reference, target, rx, ry, cx, cy, block_size, search_x, search_y,
+                        opts.compute_confidence,
                     ),
                 };
 
@@ -278,6 +310,7 @@ pub fn diff(
                     dx: best_dx,
                     dy: best_dy,
                     cost: best_cost,
+                    second_cost,
                     matched: best_cost <= threshold_total,
                 }
             })
@@ -306,36 +339,103 @@ fn search_full(
     search_x: i32,
     search_y: i32,
     step: i32,
-) -> (i32, i32, u64) {
-    let mut best_cost =
-        sad_block(reference, target, rx, ry, cx, cy, block_size, u64::MAX);
-    let mut best_dx = 0i32;
-    let mut best_dy = 0i32;
-    if best_cost == 0 {
-        return (0, 0, 0);
+    compute_confidence: bool,
+) -> (i32, i32, u64, u64) {
+    let mut tracker = SecondBestTracker::new(block_size as i32);
+    let initial = sad_block(reference, target, rx, ry, cx, cy, block_size, u64::MAX);
+    tracker.consider(0, 0, initial);
+    if initial == 0 && !compute_confidence {
+        return (0, 0, 0, u64::MAX);
     }
     let mut dy = -search_y;
     while dy <= search_y {
         let mut dx = -search_x;
         while dx <= search_x {
             if !(dx == 0 && dy == 0) {
+                let cutoff = tracker.second_cost().max(tracker.best_cost);
                 let cost = sad_block(
-                    reference, target, rx, ry, cx + dx, cy + dy, block_size, best_cost,
+                    reference, target, rx, ry, cx + dx, cy + dy, block_size, cutoff,
                 );
-                if cost < best_cost {
-                    best_cost = cost;
-                    best_dx = dx;
-                    best_dy = dy;
-                    if best_cost == 0 {
-                        return (best_dx, best_dy, 0);
-                    }
+                tracker.consider(dx, dy, cost);
+                if !compute_confidence && tracker.best_cost == 0 {
+                    return (tracker.best_dx, tracker.best_dy, 0, u64::MAX);
                 }
             }
             dx += step;
         }
         dy += step;
     }
-    (best_dx, best_dy, best_cost)
+    (
+        tracker.best_dx,
+        tracker.best_dy,
+        tracker.best_cost,
+        tracker.second_cost(),
+    )
+}
+
+/// Tracks the best and the spatially-separated runner-up SAD seen so far.
+/// "Spatially separated" means displacement differs from the current best by
+/// more than `block_size` pixels, so we don't double-count near-duplicates
+/// from the immediate neighborhood.
+struct SecondBestTracker {
+    sep: i32,
+    best_cost: u64,
+    best_dx: i32,
+    best_dy: i32,
+    runner_cost: u64,
+    runner_dx: i32,
+    runner_dy: i32,
+}
+
+impl SecondBestTracker {
+    fn new(sep: i32) -> Self {
+        Self {
+            sep,
+            best_cost: u64::MAX,
+            best_dx: 0,
+            best_dy: 0,
+            runner_cost: u64::MAX,
+            runner_dx: 0,
+            runner_dy: 0,
+        }
+    }
+
+    fn second_cost(&self) -> u64 {
+        self.runner_cost
+    }
+
+    #[inline]
+    fn far_from(&self, dx: i32, dy: i32, ax: i32, ay: i32) -> bool {
+        (dx - ax).abs() > self.sep || (dy - ay).abs() > self.sep
+    }
+
+    fn consider(&mut self, dx: i32, dy: i32, cost: u64) {
+        if cost == u64::MAX {
+            return;
+        }
+        if cost < self.best_cost {
+            // New best — if it's spatially separated from the previous best,
+            // demote the previous best to runner-up; otherwise keep the
+            // existing runner if it stays far from the new best.
+            if self.best_cost != u64::MAX && self.far_from(dx, dy, self.best_dx, self.best_dy) {
+                self.runner_cost = self.best_cost;
+                self.runner_dx = self.best_dx;
+                self.runner_dy = self.best_dy;
+            } else if self.runner_cost != u64::MAX
+                && !self.far_from(dx, dy, self.runner_dx, self.runner_dy)
+            {
+                // Existing runner is now too close to the new best — drop it.
+                self.runner_cost = u64::MAX;
+            }
+            self.best_cost = cost;
+            self.best_dx = dx;
+            self.best_dy = dy;
+        } else if cost < self.runner_cost && self.far_from(dx, dy, self.best_dx, self.best_dy) {
+            self.runner_cost = cost;
+            self.runner_dx = dx;
+            self.runner_dy = dy;
+        }
+    }
 }
 
 /// Two-phase search: a coarse uniform grid scan over the whole window
@@ -353,39 +453,31 @@ fn search_hierarchical(
     block_size: u32,
     search_x: i32,
     search_y: i32,
-) -> (i32, i32, u64) {
-    let mut best_cost =
-        sad_block(reference, target, rx, ry, cx, cy, block_size, u64::MAX);
-    let mut best_dx = 0i32;
-    let mut best_dy = 0i32;
-    if best_cost == 0 {
-        return (0, 0, 0);
+    compute_confidence: bool,
+) -> (i32, i32, u64, u64) {
+    let mut tracker = SecondBestTracker::new(block_size as i32);
+    let initial = sad_block(reference, target, rx, ry, cx, cy, block_size, u64::MAX);
+    tracker.consider(0, 0, initial);
+    if initial == 0 && !compute_confidence {
+        return (0, 0, 0, u64::MAX);
     }
 
-    // Coarse stride: roughly 1/8 of the larger search radius, but capped at
-    // `block_size` so that the refinement halving (whose total reach is
-    // `coarse - 1`) always overlaps neighboring coarse points and so that
-    // any block-aligned feature in the target is hit by the coarse scan.
     let coarse = (search_x.max(search_y) / 8)
         .max(1)
         .min(block_size as i32);
 
-    // Phase 1: coarse uniform scan.
     let mut dy = -search_y;
     while dy <= search_y {
         let mut dx = -search_x;
         while dx <= search_x {
             if !(dx == 0 && dy == 0) {
+                let cutoff = tracker.second_cost().max(tracker.best_cost);
                 let cost = sad_block(
-                    reference, target, rx, ry, cx + dx, cy + dy, block_size, best_cost,
+                    reference, target, rx, ry, cx + dx, cy + dy, block_size, cutoff,
                 );
-                if cost < best_cost {
-                    best_cost = cost;
-                    best_dx = dx;
-                    best_dy = dy;
-                    if best_cost == 0 {
-                        return (best_dx, best_dy, 0);
-                    }
+                tracker.consider(dx, dy, cost);
+                if !compute_confidence && tracker.best_cost == 0 {
+                    return (tracker.best_dx, tracker.best_dy, 0, u64::MAX);
                 }
             }
             dx += coarse;
@@ -393,7 +485,6 @@ fn search_hierarchical(
         dy += coarse;
     }
 
-    // Phase 2: halving logarithmic refinement around the best coarse hit.
     let mut stride = (coarse / 2).max(1);
     loop {
         for oy in -1..=1 {
@@ -401,21 +492,18 @@ fn search_hierarchical(
                 if ox == 0 && oy == 0 {
                     continue;
                 }
-                let dx = best_dx + ox * stride;
-                let dy = best_dy + oy * stride;
+                let dx = tracker.best_dx + ox * stride;
+                let dy = tracker.best_dy + oy * stride;
                 if dx.abs() > search_x || dy.abs() > search_y {
                     continue;
                 }
+                let cutoff = tracker.second_cost().max(tracker.best_cost);
                 let cost = sad_block(
-                    reference, target, rx, ry, cx + dx, cy + dy, block_size, best_cost,
+                    reference, target, rx, ry, cx + dx, cy + dy, block_size, cutoff,
                 );
-                if cost < best_cost {
-                    best_cost = cost;
-                    best_dx = dx;
-                    best_dy = dy;
-                    if best_cost == 0 {
-                        return (best_dx, best_dy, 0);
-                    }
+                tracker.consider(dx, dy, cost);
+                if !compute_confidence && tracker.best_cost == 0 {
+                    return (tracker.best_dx, tracker.best_dy, 0, u64::MAX);
                 }
             }
         }
@@ -424,7 +512,12 @@ fn search_hierarchical(
         }
         stride /= 2;
     }
-    (best_dx, best_dy, best_cost)
+    (
+        tracker.best_dx,
+        tracker.best_dy,
+        tracker.best_cost,
+        tracker.second_cost(),
+    )
 }
 
 /// A pair of [`BlockMatchResult`]s, one for each direction. `forward` flags
@@ -461,6 +554,74 @@ mod tests {
     }
 
     #[test]
+    fn confidence_is_low_when_runner_is_close() {
+        // A block of pure gray in `a` matched against `b` that contains
+        // many gray patches of the same shade → many tied near-zero SADs at
+        // spatially separated locations → confidence collapses to 0.
+        let mut a = solid(64, 64, [255, 255, 255, 255]);
+        for y in 16..24 {
+            for x in 16..24 {
+                a.put_pixel(x, y, Rgba([180, 180, 180, 255]));
+            }
+        }
+        let mut b = solid(64, 64, [255, 255, 255, 255]);
+        // Drop the same gray patch at TWO distinct locations in `b`.
+        for &(ox, oy) in &[(8u32, 8u32), (40, 40)] {
+            for y in 0..8 {
+                for x in 0..8 {
+                    b.put_pixel(ox + x, oy + y, Rgba([180, 180, 180, 255]));
+                }
+            }
+        }
+        let opts = BlockMatchOptions {
+            block_size: 8,
+            search_x: 32,
+            search_y: 32,
+            mode: SearchMode::Full,
+            compute_confidence: true,
+            ..Default::default()
+        };
+        let result = diff(&a, &b, &opts);
+        let mv = result.get(2, 2);
+        assert_eq!(mv.cost, 0);
+        // Two equally-good matches exist far apart, so the runner-up cost
+        // also hits 0 → confidence is 0.
+        assert_eq!(mv.confidence(), 0.0);
+    }
+
+    #[test]
+    fn confidence_is_high_on_unique_content() {
+        // A single bright square on white background: only one position
+        // in the target produces a low SAD, so confidence should be high.
+        let mut a = solid(64, 64, [255, 255, 255, 255]);
+        for y in 16..24 {
+            for x in 16..24 {
+                a.put_pixel(x, y, Rgba([0, 200, 0, 255]));
+            }
+        }
+        let mut b = solid(64, 64, [255, 255, 255, 255]);
+        for y in 24..32 {
+            for x in 32..40 {
+                b.put_pixel(x, y, Rgba([0, 200, 0, 255]));
+            }
+        }
+        let opts = BlockMatchOptions {
+            block_size: 8,
+            search_x: 24,
+            search_y: 16,
+            mode: SearchMode::Full,
+            compute_confidence: true,
+            ..Default::default()
+        };
+        let result = diff(&a, &b, &opts);
+        // Block at (2, 2) in `a` is the green square; should find unique
+        // match at (+16, +8).
+        let mv = result.get(2, 2);
+        assert_eq!(mv.cost, 0);
+        assert!(mv.confidence() > 0.5, "expected high confidence, got {}", mv.confidence());
+    }
+
+    #[test]
     fn identical_images_have_zero_cost_and_all_matched() {
         let img = solid(64, 64, [200, 100, 50, 255]);
         let result = diff(&img, &img, &BlockMatchOptions::default());
@@ -487,9 +648,9 @@ mod tests {
             block_size: 16,
             search_x: 0,
             search_y: 32,
-            step: 1,
             threshold: 0,
             mode: SearchMode::Full,
+            ..Default::default()
         };
         let result = diff(&a, &b, &opts);
         // The block originally containing the stripe (row 1) should find it
@@ -565,9 +726,9 @@ mod tests {
             block_size: 16,
             search_x: 64,
             search_y: 64,
-            step: 1,
             threshold: 0,
             mode: SearchMode::Hierarchical,
+            ..Default::default()
         };
         let result = diff(&a, &b, &opts);
         // The block at (1, 1) in `a` is the green square; it should find its
@@ -596,9 +757,9 @@ mod tests {
             block_size: 16,
             search_x: 32,
             search_y: 0,
-            step: 1,
             threshold: 0,
             mode: SearchMode::Full,
+            ..Default::default()
         };
         let result = diff(&a, &b, &opts);
         let mv = result.get(1, 0);
