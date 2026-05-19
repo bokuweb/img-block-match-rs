@@ -1,49 +1,52 @@
 # img-block-match-rs
 
-2D block-matching image diff for Rust.
+2D block-matching image diff for Rust + WebAssembly.
 
-Pixel-wise diffs (e.g. `pixelmatch`) flag everything below an inserted header
-or beside a widened sidebar as "changed". Row-based LCS diffs (e.g.
+Pixel-wise diffs (e.g. `pixelmatch`) flag everything below an inserted
+header or beside a widened sidebar as "changed". Row-based LCS diffs (e.g.
 [`lcs-image-diff-rs`](https://github.com/bokuweb/lcs-image-diff-rs)) handle
-vertical reflow but miss horizontal shifts. This crate handles both axes by
-treating diff like video motion estimation:
+vertical reflow but miss horizontal shifts. This crate handles both axes
+by treating diff like video motion estimation:
 
 1. Split the reference image into fixed-size blocks (default 16×16).
 2. For each block, search a window in the target image (`±search_x`,
    `±search_y`) for the best (lowest SAD) match.
-3. Only blocks whose residual exceeds a threshold after motion compensation
-   are flagged as real changes.
+3. Only blocks whose residual exceeds a threshold after motion
+   compensation are flagged as real changes.
+
+Outputs are emitted both as a rendered diff image and as machine-readable
+bounding-box JSON, so the same library can drive a visual report and a
+test runner.
+
+---
 
 ## Demo
 
-### Real screenshot: navigation menu
-
 A nav menu where `Starred` was renamed to `Favorite` and a new `Important`
-entry was inserted in the second section (which shifts every following row
-down by one line):
+entry was inserted (which shifts every row below it down by one line):
 
 | before | after |
 |:-:|:-:|
 | ![menu before](assets/menu-before.png) | ![menu after](assets/menu-after.png) |
 
-Naive pixel-wise diff (`--search-x 0 --search-y 0`):
+### Naive pixel-wise diff (`--search-x 0 --search-y 0`)
 
 ![naive menu diff](assets/diff-menu-naive.png)
 
-> "Starred" and every row in the lower section is flagged red — even though
-> `All mail`, `Trash`, `Spam`, `Follow up` are unchanged content that just
-> moved down.
+> `Starred` plus the entire lower section get flagged — even though
+> `All mail`, `Trash`, `Spam`, `Follow up` are unchanged content that
+> just moved down one row.
 
-Block-matching diff (`--search-y 80 --mode fast`):
+### Block-matching diff (`--search-y 80 --mode fast`)
 
-![block-match menu diff (outline)](assets/diff-menu-block-match.png)
+![block-match menu diff](assets/diff-menu-block-match.png)
 
 > Left panel (red, removed): just `Starred`. Right panel (green, added):
 > `Favorite` and the newly inserted `Important` row. Everything else is
 > correctly recognized as "same content, just shifted".
 
-Two highlight styles are available — `outline` (default, content stays
-visible for review) and `filled` (solid blocks, highest visibility):
+Two highlight styles — `outline` (default; content stays visible for
+review) and `filled` (solid blocks, highest visibility):
 
 | `--style outline` | `--style filled` |
 |:-:|:-:|
@@ -53,61 +56,29 @@ visible for review) and `filled` (solid blocks, highest visibility):
 cargo run --release -- assets/menu-before.png assets/menu-after.png \
     --search-x 16 --search-y 80 --block-size 8 --threshold 8 --mode fast \
     --merge-gap 2 --min-blocks 2 \
-    -o assets/diff-menu-block-match.png
+    -o diff.png
 ```
 
-### Synthetic: 2-axis layout shift
+A second synthetic sample with both X and Y shifts plus a real content
+change (red badge) is included for stress-testing — see
+[`assets/before.png`](assets/before.png) and
+[`examples/generate_sample.rs`](examples/generate_sample.rs).
 
-A synthetic "web layout" pair where the header grew taller (+24px Y shift)
-**and** the sidebar grew wider (+64px X shift), and one genuine change was
-made (a red badge added to the middle card):
-
-| before | after |
-|:-:|:-:|
-| ![before](assets/before.png) | ![after](assets/after.png) |
-
-### Naive pixel-wise diff (no shift tolerance)
-
-`--search-x 0 --search-y 0` (equivalent to a per-pixel comparator):
-
-![naive diff](assets/diff-naive.png)
-
-> **1406 / 2400 blocks (58.58 %) flagged as different** — the entire page
-> below the header lights up because everything moved.
-
-### Block-matching diff (this crate)
-
-`--search-x 96 --search-y 96 --block-size 8` (bidirectional):
-
-![block-matching diff](assets/diff-block-match.png)
-
-> **0 removed + 15 / 2400 added (0.63 %) flagged** — only the new badge.
-
-The left panel is the reference with "removed" blocks tinted red; the right
-panel is the target with "added" blocks tinted green.
-
-Reproduce locally:
-
-```sh
-cargo run --release --example generate_sample
-cargo run --release -- assets/before.png assets/after.png \
-    --search-x 96 --search-y 96 --block-size 8 --threshold 4 \
-    -o assets/diff-block-match.png
-```
+---
 
 ## JavaScript / WebAssembly
 
-A `wasm-bindgen` wrapper is available behind the `wasm` cargo feature.
+A `wasm-bindgen` wrapper is exposed behind the `wasm` cargo feature.
 Build Node and Web bundles in one shot:
 
 ```sh
-./scripts/build-wasm.sh
-# outputs pkg-node/ and pkg-web/
+./scripts/build-wasm.sh   # outputs pkg-node/ and pkg-web/
 ```
 
 ```js
 // node
 import { diffPng } from './pkg-node/img_block_match.js';
+
 const ref = new Uint8Array(fs.readFileSync('before.png'));
 const tgt = new Uint8Array(fs.readFileSync('after.png'));
 
@@ -127,86 +98,94 @@ const r = diffPng(ref, tgt, {
 // browser
 import init, { diffPng } from './pkg-web/img_block_match.js';
 await init();
-const result = diffPng(refBytes, tgtBytes, { /* ... */ });
+const r = diffPng(refBytes, tgtBytes, { /* ... */ });
 ```
+
+The WASM bundle is ~416 KB (post `wasm-opt`) and decodes PNG/JPEG
+internally so callers only pass byte arrays. PNG decode runs inside
+WASM too, so there is no JS-side image work.
 
 Smoke test against the bundled samples:
 
 ```sh
-node scripts/test-wasm.mjs
-# [menu change] menu-before.png vs menu-after.png  (7.58 ms)
-#   verdict: review
-#   removed: [{"x":80,"y":72,"width":48,"height":16,"blocks":10}]
-#   added:   [{"x":72,"y":72,"width":64,"height":16,"blocks":14},
-#             {"x":16,"y":280,"width":72,"height":16,"blocks":14}]
+$ node scripts/test-wasm.mjs
+[menu change] menu-before.png vs menu-after.png  (7.58 ms)
+  verdict: review
+  removed: [{"x":80,"y":72,"width":48,"height":16,"blocks":10}]
+  added:   [{"x":72,"y":72,"width":64,"height":16,"blocks":14},
+            {"x":16,"y":280,"width":72,"height":16,"blocks":14}]
 ```
 
-The WASM bundle is ~416 KB (post `wasm-opt`) and decodes PNGs internally
-so callers only need to pass byte arrays.
+---
 
-## Library
+## Rust library
 
 ```rust
 use img_block_match::{
-    diff_bidirectional, render_bidirectional, BlockMatchOptions, RenderOptions,
+    diff_bidirectional, render_bidirectional, BlockMatchOptions,
+    RenderOptions, SearchMode,
 };
 
 let reference = image::open("expected.png")?.to_rgba8();
-let target = image::open("actual.png")?.to_rgba8();
+let target    = image::open("actual.png")?.to_rgba8();
 
 let opts = BlockMatchOptions {
-    block_size: 16,
-    search_x: 64,
-    search_y: 128,
-    step: 1,
+    block_size: 8,
+    search_x: 16,
+    search_y: 80,
     threshold: 8,
+    mode: SearchMode::Hierarchical,
+    ..Default::default()
 };
 let bd = diff_bidirectional(&reference, &target, &opts);
 let out = render_bidirectional(&reference, &target, &bd, &RenderOptions::default());
 out.save("diff.png")?;
 ```
 
-`BlockMatchResult::vectors` is a `cols * rows` grid of `MotionVector { dx, dy,
-cost, matched }` you can use to build your own visualization (heatmap,
-overlay, vector field, ...).
+`BlockMatchResult::vectors` is a `cols * rows` grid of
+`MotionVector { dx, dy, cost, second_cost, matched }` you can use to
+build custom visualizations.
 
-> Block matching is directional. `diff(a, b)` flags blocks of `a` that have
-> no match in `b` — i.e. content that disappeared. To also catch additions,
-> use `diff_bidirectional` (the CLI does this by default).
+> Block matching is directional. `diff(a, b)` only flags blocks of `a`
+> that have no match in `b` — i.e. content that disappeared. To also
+> catch additions, use `diff_bidirectional` (the CLI does this by
+> default).
+
+---
 
 ## CLI
 
 ```sh
 cargo run --release -- expected.png actual.png \
     --block-size 16 --search-x 64 --search-y 128 --threshold 8 \
-    -o diff.png
+    --mode fast -o diff.png
 ```
 
-- `--one-way` to render a single-direction overlay on the reference image.
-- `--draw-vectors` to draw motion vectors on top.
-- `--mode fast` for the hierarchical search (recommended once the search
-  radius gets large).
-- `--style outline|filled` (default `outline`), `--stroke N` to tune the
-  outline thickness.
+Common flags:
 
-## Region clustering (for tooling)
+| flag | default | purpose |
+|---|---|---|
+| `--mode full\|fast` | `full` | search strategy (use `fast` for any non-trivial search radius) |
+| `--style outline\|filled` | `outline` | how regions are drawn |
+| `--stroke N` | `2` | outline thickness in pixels |
+| `--merge-gap N` | `1` | bridge clusters separated by N matched blocks |
+| `--min-blocks N` | `1` | discard clusters smaller than this (drops AA noise) |
+| `--smooth` | off | 3×3 majority filter on the `matched` flag |
+| `--one-way` | off | render only the reference panel with "removed" overlay |
+| `--heatmap` | off | per-block residual on a green→yellow→red gradient |
+| `--json` | off | emit region bounding boxes on stdout |
+| `--confidence` | off | also track runner-up SAD (slower; see below) |
+| `--draw-vectors` | off | draw motion vectors on top of the diff |
 
-Raw block-level results are great for visualization but awkward to consume
-programmatically. `BlockMatchResult::unmatched_regions(merge_gap, min_blocks)`
-groups spatially-adjacent unmatched blocks into bounding rectangles via
-8-connected flood fill, with `merge_gap` blocks of dilation to bridge tight
-gaps and `min_blocks` to discard anti-aliasing noise. The renderer drives
-its highlight rectangles from this same clustering.
+---
 
-```rust
-let regions = result.unmatched_regions(/*merge_gap=*/ 2, /*min_blocks=*/ 2);
-for r in regions {
-    println!("{}x{} at ({}, {}) — {} blocks", r.width, r.height, r.x, r.y, r.block_count);
-}
-```
+## Region clustering
 
-CLI: `--json` emits region coordinates on stdout alongside the rendered
-image:
+Raw per-block results are awkward to consume programmatically.
+`BlockMatchResult::unmatched_regions(merge_gap, min_blocks)` groups
+spatially-adjacent unmatched blocks into bounding rectangles via
+8-connected flood fill. The renderer drives its highlight rectangles
+from this same clustering, so what you see is what the JSON reports:
 
 ```sh
 $ img-block-match assets/menu-before.png assets/menu-after.png \
@@ -224,102 +203,96 @@ $ img-block-match assets/menu-before.png assets/menu-after.png \
 }
 ```
 
-## Pyramid mode (experimental)
+---
 
-`diff_pyramid(reference, target, opts, coarse_scale, refine_radius)` runs
-the matcher at a downscaled level first, then refines each per-block
-prediction at full resolution in a tiny `±refine_radius` window:
-
-```rust
-let result = img_block_match::diff_pyramid(&a, &b, &opts, 4, 8);
-```
-
-With SIMD-accelerated single-pass matching the resize overhead usually
-dominates, so the pyramid path is only worth it for niche workloads where
-the search window must be a very large fraction of the image. Benchmark
-your scenario before adopting it; for everyday use prefer `diff` /
-`diff_bidirectional` with `SearchMode::Hierarchical`.
-
-## Block-level post-processing
-
-- `BlockMatchResult::smooth_matched()` runs a 3×3 majority filter on the
-  `matched` flag. Use it to absorb isolated anti-aliasing false positives
-  before clustering into regions. CLI: `--smooth`.
-- `render_heatmap(base, &result, max_cost, alpha)` renders each block tinted
-  on a green→yellow→red gradient by its residual cost. Lets you see "how
-  close" matches are rather than just a binary classification. CLI:
-  `--heatmap` (forces single-direction mode).
-
-## Match confidence (opt-in)
-
-Setting `BlockMatchOptions::compute_confidence = true` (CLI: `--confidence`)
-also tracks the best spatially-distinct **runner-up** SAD for each block.
-The result is exposed as a normalized 0..=1 score:
-
-```rust
-mv.confidence()  // (second_cost - cost) / second_cost
-```
-
-- ≈ 1.0 — the winning displacement is uniquely good (text, edges, distinct
-  features).
-- ≈ 0.0 — many positions in the search window match equally well (flat
-  regions, repeating patterns) → the `(dx, dy)` vector is unreliable.
-
-Useful for downstream tools that want to discount spurious matches in
-uniform areas before treating a "matched" block as evidence of real content
-correspondence. Disables the early-return-on-perfect-match optimization, so
-expect a 2–6× slowdown depending on mode.
-
-## Search modes
+## Search modes & performance
 
 | mode | strategy | when to use |
 |---|---|---|
-| `full` (default) | exhaustive scan of every `(dx, dy)` in the window, with `step` honored | small search radii, or when you need a globally optimal match |
-| `fast` | coarse uniform grid scan (stride ≈ search/8, capped at `block_size`) + 3×3 logarithmic refinement halving down to stride 1 | large search radii, real screenshots |
+| `Full` (default) | exhaustive scan of every `(dx, dy)` in the window | small radii, or globally-optimal matching |
+| `Hierarchical` (CLI `--mode fast`) | coarse uniform grid scan (stride ≈ search/8, capped at `block_size`) + 3×3 logarithmic refinement | large radii, real screenshots |
 
-Benchmark on the 480×320 demo above (8×8 blocks, 2400 blocks total, 8-core
-laptop, bidirectional, with SSE2 SAD on x86_64):
+The SAD inner loop uses explicit SIMD: `_mm_sad_epu8` on x86_64 (SSE2),
+`vabdq_u8` / `vaddlvq_u8` on aarch64 (NEON), with a scalar fallback.
 
-| input | mode | search | elapsed |
-|---|---|---:|---:|
-| menu screenshot (360×512) | fast | ±16 / ±80 | **1.7 ms** |
-| synthetic demo | fast | ±96 / ±96 | 5 ms |
-| synthetic demo | full | ±96 / ±96 | 1.1 s |
-
-The SAD inner loop uses explicit SIMD: `_mm_sad_epu8` on x86_64 (SSE2) and
-`vabdq_u8`/`vaddlvq_u8` on aarch64 (NEON). Scalar fallback elsewhere.
-
-End-to-end speedup on a 1920×1080 synthetic reflow workload:
+End-to-end speedup on a 1920×1080 synthetic reflow workload (fast mode,
+bidirectional):
 
 | search ±x/±y | scalar / auto-vec | NEON intrinsics |
 |---:|---:|---:|
-| 64 / 96  | 255 ms |  20 ms (**~12×**) |
-| 200 / 300 | 3.78 s | 183 ms (**~21×**) |
+| 64 / 96      | 255 ms |  20 ms (**~12×**) |
+| 200 / 300    | 3.78 s | 183 ms (**~21×**) |
 | 4K, 200 / 400 | 1.14 s |  57 ms (**~20×**) |
+
+Real menu screenshot (360×512, bidirectional, fast mode): **~1.7 ms**.
+
+---
+
+## Post-processing
+
+- **`smooth_matched()`** — 3×3 majority filter on the `matched` flag.
+  Absorbs isolated anti-aliasing false positives and fills 1-block holes
+  in genuine clusters. CLI: `--smooth`.
+- **`render_heatmap(base, &result, max_cost, alpha)`** — tints every block
+  on a green→yellow→red gradient by residual cost. Shows "how close"
+  rather than a binary classification. CLI: `--heatmap`.
+
+### Match confidence (opt-in)
+
+Setting `BlockMatchOptions::compute_confidence = true` (CLI:
+`--confidence`) also tracks the best spatially-distinct runner-up SAD
+for each block:
+
+```rust
+mv.confidence()  // (second_cost - cost) / second_cost, in 0..=1
+```
+
+- `≈ 1.0` — the winning displacement is uniquely good (text, edges).
+- `≈ 0.0` — many positions match equally well (flat regions, repeating
+  patterns) → `(dx, dy)` is unreliable; downstream tools should discount.
+
+Disables the early-return-on-perfect-match optimization, so expect a
+2–6× slowdown.
+
+---
+
+## Pyramid mode (experimental)
+
+`diff_pyramid(reference, target, opts, coarse_scale, refine_radius)`
+runs the matcher at a downscaled level first, then refines each per-block
+prediction at full resolution in a tiny `±refine_radius` window. With
+the SIMD-accelerated single-pass matcher the resize overhead usually
+dominates, so prefer plain `diff_bidirectional` with
+`SearchMode::Hierarchical` and reach for the pyramid only when the
+search window must cover a very large fraction of the image.
+
+---
 
 ## Tuning
 
-- `block_size`: smaller catches finer changes but is slower and noisier on
-  anti-aliased text. 8–32 is typical.
-- `search_x` / `search_y`: how far content is allowed to shift. Vertical is
-  usually much larger than horizontal for web screenshots.
-- `step`: increase to skip candidates (faster, less accurate). Use 1 for
-  exhaustive full search; 2–4 with a small block size is often a good
-  trade-off.
-- `threshold`: per-channel per-pixel SAD allowed inside a matched block. 0 =
-  pixel-perfect match required; 4–16 tolerates anti-aliasing differences.
+- `block_size`: smaller catches finer changes but is slower and noisier
+  on anti-aliased text. 8–32 is typical.
+- `search_x` / `search_y`: how far content is allowed to shift.
+  Vertical is usually much larger than horizontal for web screenshots.
+- `threshold`: per-channel per-pixel SAD allowed inside a matched block.
+  0 = pixel-perfect; 4–16 tolerates anti-aliasing differences.
+- `merge_gap` / `min_blocks`: tighten or relax clustering. `min_blocks=2`
+  reliably drops AA flickers; `merge_gap=2` bridges a row of padding
+  between sibling text lines.
 
-## Integration sketch: visual regression pass/review
+---
 
-A common screenshot-regression workflow is "PASS unless content changed,
-otherwise FAIL and show me the diff". Pixel diffs fail this even when only
-the layout reflowed. Block-matching short-circuits that:
+## Integration sketch: visual regression pass / review
+
+A typical screenshot-regression workflow is "PASS unless content
+changed". Pixel diffs fail this when layout reflows. Block-matching
+short-circuits that:
 
 ```
-$ cargo run --release --example regression_check -- assets/menu-before.png assets/menu-before.png
+$ cargo run --release --example regression_check -- before.png before.png
 PASS  (... decided in 6 ms)
 
-$ cargo run --release --example regression_check -- assets/menu-before.png assets/menu-after.png
+$ cargo run --release --example regression_check -- before.png after.png
 REVIEW
   removed regions: 1
   added regions:   2
@@ -329,8 +302,11 @@ REVIEW
 ```
 
 [examples/regression_check.rs](examples/regression_check.rs) is a 60-line
-template — drop it next to a per-pixel differ to take the slow path only on
-the unmatched-region bounding boxes, not the whole image.
+template — drop it next to a per-pixel differ and the slow pixel path
+runs only inside the unmatched-region bounding boxes, never the whole
+image.
+
+---
 
 ## License
 
