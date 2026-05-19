@@ -1,7 +1,7 @@
 use clap::{Parser, ValueEnum};
 use img_block_match::{
-    diff, diff_bidirectional, draw_regions, render_bidirectional, render_diff, render_heatmap,
-    BlockMatchOptions, Region, RenderOptions, SearchMode,
+    diff, diff_bidirectional, render_bidirectional, render_diff, render_heatmap, BlockMatchOptions,
+    HighlightStyle, Region, RenderOptions, SearchMode,
 };
 use std::time::Instant;
 
@@ -12,6 +12,14 @@ enum CliMode {
     /// Hierarchical (coarse scan + logarithmic refinement) — orders of
     /// magnitude faster for wide search ranges.
     Fast,
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum)]
+enum CliStyle {
+    /// Just the bounding-box outline; content stays readable.
+    Outline,
+    /// Solid fill over the entire region.
+    Filled,
 }
 
 impl From<CliMode> for SearchMode {
@@ -57,10 +65,12 @@ struct Args {
     /// Search strategy within the window.
     #[arg(long, value_enum, default_value_t = CliMode::Full)]
     mode: CliMode,
-    /// Draw bounding boxes around clustered unmatched regions on top of the
-    /// diff image.
-    #[arg(long, default_value_t = false)]
-    regions: bool,
+    /// Highlight style for unmatched regions.
+    #[arg(long, value_enum, default_value_t = CliStyle::Outline)]
+    style: CliStyle,
+    /// Outline stroke width in pixels (ignored when --style=filled).
+    #[arg(long, default_value_t = 2)]
+    stroke: u32,
     /// When merging adjacent unmatched blocks into regions, allow this many
     /// matched blocks of gap between them.
     #[arg(long, default_value_t = 1)]
@@ -122,8 +132,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         compute_confidence: args.confidence,
     };
     let render_opts = RenderOptions {
+        style: match args.style {
+            CliStyle::Outline => HighlightStyle::Outline { stroke: args.stroke },
+            CliStyle::Filled => HighlightStyle::Filled,
+        },
+        merge_gap: args.merge_gap,
+        min_blocks: args.min_blocks,
         draw_vectors: args.draw_vectors,
-        ..Default::default()
     };
 
     let t = Instant::now();
@@ -155,10 +170,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
         let regions = result.unmatched_regions(args.merge_gap, args.min_blocks);
         eprintln!("regions: {}", regions.len());
-        let mut out = render_diff(&reference, &result, [220, 50, 50], &render_opts);
-        if args.regions {
-            draw_regions(&mut out, &regions, [200, 0, 0, 255]);
-        }
+        let out = render_diff(&reference, &result, [220, 50, 50], &render_opts);
         out.save(&args.output)?;
         if args.json {
             println!("{{\n{}\n}}", regions_to_json("changed", &regions));
@@ -188,17 +200,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             added.len(),
         );
         eprintln!("elapsed: {:?}", elapsed);
-        let mut out = render_bidirectional(&reference, &target, &bd, &render_opts);
-        if args.regions {
-            // The right panel is offset by left.width() + 4 (gap).
-            let mut right_regions = added.clone();
-            let x_off = reference.width() + 4;
-            for r in &mut right_regions {
-                r.x += x_off;
-            }
-            draw_regions(&mut out, &removed, [200, 0, 0, 255]);
-            draw_regions(&mut out, &right_regions, [0, 160, 60, 255]);
-        }
+        let out = render_bidirectional(&reference, &target, &bd, &render_opts);
         out.save(&args.output)?;
         if args.json {
             println!(

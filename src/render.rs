@@ -100,10 +100,32 @@ pub fn draw_regions(img: &mut RgbaImage, regions: &[Region], color: [u8; 4]) {
     }
 }
 
+/// How unmatched regions are highlighted on top of the reference / target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HighlightStyle {
+    /// Draw only the bounding-box outline of each region (`stroke` pixels
+    /// wide). Underlying content stays visible — recommended for review
+    /// workflows.
+    Outline { stroke: u32 },
+    /// Fill the region's bounding box with the highlight color (no
+    /// transparency). High visibility but obscures content.
+    Filled,
+}
+
+impl Default for HighlightStyle {
+    fn default() -> Self {
+        HighlightStyle::Outline { stroke: 2 }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct RenderOptions {
-    /// Alpha (0..=255) used when blending the red overlay onto unmatched blocks.
-    pub overlay_alpha: u8,
+    /// How to highlight unmatched regions.
+    pub style: HighlightStyle,
+    /// Passed to `BlockMatchResult::unmatched_regions` when clustering.
+    pub merge_gap: u32,
+    /// Passed to `BlockMatchResult::unmatched_regions` when clustering.
+    pub min_blocks: u32,
     /// If true, draw a small arrow on each block showing its motion vector.
     pub draw_vectors: bool,
 }
@@ -111,15 +133,17 @@ pub struct RenderOptions {
 impl Default for RenderOptions {
     fn default() -> Self {
         Self {
-            overlay_alpha: 160,
+            style: HighlightStyle::default(),
+            merge_gap: 1,
+            min_blocks: 1,
             draw_vectors: false,
         }
     }
 }
 
-/// Renders a diff visualization by overlaying `color` on blocks that could
-/// not be matched (i.e. genuine content differences after accounting for X/Y
-/// shifts).
+/// Renders a diff visualization by clustering unmatched blocks into
+/// regions and drawing each region's bounding box in `color` according to
+/// `opts.style`.
 pub fn render_diff(
     base: &RgbaImage,
     result: &BlockMatchResult,
@@ -127,45 +151,61 @@ pub fn render_diff(
     opts: &RenderOptions,
 ) -> RgbaImage {
     let mut out = base.clone();
-    overlay_unmatched(&mut out, result, color, opts.overlay_alpha);
+    let regions = result.unmatched_regions(opts.merge_gap, opts.min_blocks);
+    paint_regions(&mut out, &regions, color, opts.style);
     if opts.draw_vectors {
         draw_vectors(&mut out, result);
     }
     out
 }
 
-fn overlay_unmatched(
+fn paint_regions(
     img: &mut RgbaImage,
-    result: &BlockMatchResult,
+    regions: &[Region],
     color: [u8; 3],
-    alpha: u8,
+    style: HighlightStyle,
 ) {
-    let b = result.block_size;
-    let a = alpha as u16;
-    let inv = 255u16 - a;
     let (w, h) = (img.width(), img.height());
-    for by in 0..result.rows {
-        for bx in 0..result.cols {
-            let mv = result.get(bx, by);
-            if mv.matched {
-                continue;
-            }
-            let x0 = bx * b;
-            let y0 = by * b;
-            for j in 0..b {
-                let y = y0 + j;
-                if y >= h {
-                    break;
-                }
-                for i in 0..b {
-                    let x = x0 + i;
-                    if x >= w {
-                        break;
+    let c = Rgba([color[0], color[1], color[2], 255]);
+    for r in regions {
+        let x1 = r.x.min(w);
+        let y1 = r.y.min(h);
+        let x2 = (r.x + r.width).min(w);
+        let y2 = (r.y + r.height).min(h);
+        if x2 <= x1 || y2 <= y1 {
+            continue;
+        }
+        match style {
+            HighlightStyle::Filled => {
+                for y in y1..y2 {
+                    for x in x1..x2 {
+                        img.put_pixel(x, y, c);
                     }
-                    let px = img.get_pixel_mut(x, y);
-                    px.0[0] = ((color[0] as u16 * a + px.0[0] as u16 * inv) / 255) as u8;
-                    px.0[1] = ((color[1] as u16 * a + px.0[1] as u16 * inv) / 255) as u8;
-                    px.0[2] = ((color[2] as u16 * a + px.0[2] as u16 * inv) / 255) as u8;
+                }
+            }
+            HighlightStyle::Outline { stroke } => {
+                let s = stroke.max(1);
+                // Top + bottom bands.
+                for y in y1..(y1 + s).min(y2) {
+                    for x in x1..x2 {
+                        img.put_pixel(x, y, c);
+                    }
+                }
+                for y in y2.saturating_sub(s).max(y1)..y2 {
+                    for x in x1..x2 {
+                        img.put_pixel(x, y, c);
+                    }
+                }
+                // Left + right bands (skip rows already drawn above).
+                let inner_y1 = (y1 + s).min(y2);
+                let inner_y2 = y2.saturating_sub(s).max(inner_y1);
+                for y in inner_y1..inner_y2 {
+                    for x in x1..(x1 + s).min(x2) {
+                        img.put_pixel(x, y, c);
+                    }
+                    for x in x2.saturating_sub(s).max(x1)..x2 {
+                        img.put_pixel(x, y, c);
+                    }
                 }
             }
         }
@@ -173,19 +213,22 @@ fn overlay_unmatched(
 }
 
 /// Renders a side-by-side composite of the bidirectional diff: the reference
-/// on the left with "removed" content overlaid in red, and the target on the
-/// right with "added" content overlaid in green. A thin separator is drawn
-/// between the two panels.
+/// on the left with "removed" regions in red, and the target on the right
+/// with "added" regions in green, each drawn in the configured highlight
+/// style. A thin separator is drawn between the two panels.
 pub fn render_bidirectional(
     reference: &RgbaImage,
     target: &RgbaImage,
     diff: &BidirectionalDiff,
     opts: &RenderOptions,
 ) -> RgbaImage {
+    let removed = diff.forward.unmatched_regions(opts.merge_gap, opts.min_blocks);
+    let added = diff.reverse.unmatched_regions(opts.merge_gap, opts.min_blocks);
+
     let mut left = reference.clone();
     let mut right = target.clone();
-    overlay_unmatched(&mut left, &diff.forward, [220, 50, 50], opts.overlay_alpha);
-    overlay_unmatched(&mut right, &diff.reverse, [40, 180, 80], opts.overlay_alpha);
+    paint_regions(&mut left, &removed, [220, 50, 50], opts.style);
+    paint_regions(&mut right, &added, [40, 180, 80], opts.style);
     if opts.draw_vectors {
         draw_vectors(&mut left, &diff.forward);
         draw_vectors(&mut right, &diff.reverse);

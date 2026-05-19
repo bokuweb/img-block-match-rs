@@ -25,5 +25,6 @@ pub use block_match::{
 };
 pub use pyramid::diff_pyramid;
 pub use render::{
-    draw_regions, render_bidirectional, render_diff, render_heatmap, RenderOptions,
+    draw_regions, render_bidirectional, render_diff, render_heatmap, HighlightStyle,
+    RenderOptions,
 };
