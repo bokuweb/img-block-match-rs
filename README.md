@@ -166,6 +166,37 @@ $ img-block-match assets/menu-before.png assets/menu-after.png \
 
 ![regions](assets/diff-menu-regions.png)
 
+## Pyramid mode (for very large images)
+
+`diff_pyramid(reference, target, opts, coarse_scale, refine_radius)` runs
+the matcher at a downscaled level first, then refines each per-block
+prediction at full resolution in a tiny `±refine_radius` window:
+
+```rust
+let result = img_block_match::diff_pyramid(&a, &b, &opts, 4, 8);
+```
+
+Helps most when the search window is wide relative to the image. Synthetic
+benchmark (1920×1080, block 16):
+
+| search ±x/±y | single-pass | pyramid (4× + ±8) | speedup |
+|---:|---:|---:|---:|
+| 64 / 96  | 255 ms | 178 ms | 1.4× |
+| 200 / 300 | 3.78 s | 763 ms | **5.0×** |
+
+For more typical small search windows or when single-pass is already
+sub-100ms, the resize overhead can dominate — measure your workload.
+
+## Block-level post-processing
+
+- `BlockMatchResult::smooth_matched()` runs a 3×3 majority filter on the
+  `matched` flag. Use it to absorb isolated anti-aliasing false positives
+  before clustering into regions. CLI: `--smooth`.
+- `render_heatmap(base, &result, max_cost, alpha)` renders each block tinted
+  on a green→yellow→red gradient by its residual cost. Lets you see "how
+  close" matches are rather than just a binary classification. CLI:
+  `--heatmap` (forces single-direction mode).
+
 ## Match confidence (opt-in)
 
 Setting `BlockMatchOptions::compute_confidence = true` (CLI: `--confidence`)

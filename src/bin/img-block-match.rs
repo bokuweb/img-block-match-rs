@@ -1,7 +1,7 @@
 use clap::{Parser, ValueEnum};
 use img_block_match::{
-    diff, diff_bidirectional, draw_regions, render_bidirectional, render_diff, BlockMatchOptions,
-    Region, RenderOptions, SearchMode,
+    diff, diff_bidirectional, draw_regions, render_bidirectional, render_diff, render_heatmap,
+    BlockMatchOptions, Region, RenderOptions, SearchMode,
 };
 use std::time::Instant;
 
@@ -78,6 +78,15 @@ struct Args {
     /// early-return-on-perfect-match optimization; expect a notable slowdown.
     #[arg(long, default_value_t = false)]
     confidence: bool,
+    /// Render a per-block residual heatmap (green=match, red=high residual)
+    /// on the reference image instead of the binary diff overlay. Implies
+    /// --one-way.
+    #[arg(long, default_value_t = false)]
+    heatmap: bool,
+    /// Apply a 3x3 majority filter on the matched flag after diff. Cleans up
+    /// isolated false-positives from anti-aliasing flips.
+    #[arg(long, default_value_t = false)]
+    smooth: bool,
 }
 
 fn regions_to_json(label: &str, regions: &[Region]) -> String {
@@ -118,8 +127,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let t = Instant::now();
-    if args.one_way {
+    if args.heatmap {
         let result = diff(&reference, &target, &opts);
+        eprintln!(
+            "blocks: {}, max cost: {}, elapsed: {:?}",
+            result.vectors.len(),
+            result.vectors.iter().map(|v| v.cost).filter(|&c| c != u64::MAX).max().unwrap_or(0),
+            t.elapsed()
+        );
+        let out = render_heatmap(&reference, &result, None, 180);
+        out.save(&args.output)?;
+        eprintln!("wrote {}", args.output);
+        return Ok(());
+    }
+    if args.one_way {
+        let mut result = diff(&reference, &target, &opts);
+        if args.smooth {
+            result.smooth_matched();
+        }
         let elapsed = t.elapsed();
         eprintln!(
             "blocks: {} total, {} unmatched ({:.2}%) in {:?}",
@@ -139,7 +164,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("{{\n{}\n}}", regions_to_json("changed", &regions));
         }
     } else {
-        let bd = diff_bidirectional(&reference, &target, &opts);
+        let mut bd = diff_bidirectional(&reference, &target, &opts);
+        if args.smooth {
+            bd.forward.smooth_matched();
+            bd.reverse.smooth_matched();
+        }
         let elapsed = t.elapsed();
         let total = bd.forward.vectors.len();
         let removed = bd.forward.unmatched_regions(args.merge_gap, args.min_blocks);

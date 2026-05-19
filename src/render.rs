@@ -1,6 +1,84 @@
 use crate::block_match::{BidirectionalDiff, BlockMatchResult, Region};
 use image::{Rgba, RgbaImage};
 
+/// Renders a heatmap where each block is tinted from green (cost 0) through
+/// yellow to red (cost ≥ `max_cost`) by blending onto `base`. Unlike
+/// [`render_diff`], this visualizes the magnitude of the residual for every
+/// block, not just a binary "matched / unmatched" classification.
+///
+/// If `max_cost` is `None`, the maximum block cost in `result` is used.
+pub fn render_heatmap(
+    base: &RgbaImage,
+    result: &BlockMatchResult,
+    max_cost: Option<u64>,
+    alpha: u8,
+) -> RgbaImage {
+    let cap = max_cost.unwrap_or_else(|| {
+        result
+            .vectors
+            .iter()
+            .map(|v| v.cost)
+            .filter(|&c| c != u64::MAX)
+            .max()
+            .unwrap_or(1)
+            .max(1)
+    });
+    let mut out = base.clone();
+    let bs = result.block_size;
+    let a = alpha as u16;
+    let inv = 255u16 - a;
+    let (w, h) = (out.width(), out.height());
+    for by in 0..result.rows {
+        for bx in 0..result.cols {
+            let mv = result.get(bx, by);
+            let c = if mv.cost == u64::MAX { cap } else { mv.cost.min(cap) };
+            let t = (c as f32 / cap as f32).clamp(0.0, 1.0);
+            let color = heat_color(t);
+            let x0 = bx * bs;
+            let y0 = by * bs;
+            for j in 0..bs {
+                let y = y0 + j;
+                if y >= h {
+                    break;
+                }
+                for i in 0..bs {
+                    let x = x0 + i;
+                    if x >= w {
+                        break;
+                    }
+                    let px = out.get_pixel_mut(x, y);
+                    px.0[0] = ((color[0] as u16 * a + px.0[0] as u16 * inv) / 255) as u8;
+                    px.0[1] = ((color[1] as u16 * a + px.0[1] as u16 * inv) / 255) as u8;
+                    px.0[2] = ((color[2] as u16 * a + px.0[2] as u16 * inv) / 255) as u8;
+                }
+            }
+        }
+    }
+    out
+}
+
+/// `t` in [0, 1] mapped to a green→yellow→red gradient.
+fn heat_color(t: f32) -> [u8; 3] {
+    let t = t.clamp(0.0, 1.0);
+    if t < 0.5 {
+        // green → yellow
+        let k = t * 2.0;
+        [
+            (k * 255.0) as u8,
+            255,
+            0,
+        ]
+    } else {
+        // yellow → red
+        let k = (t - 0.5) * 2.0;
+        [
+            255,
+            ((1.0 - k) * 255.0) as u8,
+            0,
+        ]
+    }
+}
+
 /// Draws axis-aligned bounding-box outlines (1-pixel stroke) around each
 /// region onto `img` in place.
 pub fn draw_regions(img: &mut RgbaImage, regions: &[Region], color: [u8; 4]) {

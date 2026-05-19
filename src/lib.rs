@@ -13,10 +13,14 @@
 //! directions and returns both fields together.
 
 pub mod block_match;
+pub mod pyramid;
 pub mod render;
 
 pub use block_match::{
     diff, diff_bidirectional, BidirectionalDiff, BlockMatchOptions, BlockMatchResult,
     MotionVector, Region, SearchMode,
 };
-pub use render::{draw_regions, render_bidirectional, render_diff, RenderOptions};
+pub use pyramid::diff_pyramid;
+pub use render::{
+    draw_regions, render_bidirectional, render_diff, render_heatmap, RenderOptions,
+};

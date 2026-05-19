@@ -124,9 +124,43 @@ impl BlockMatchResult {
         self.vectors.iter().filter(|v| !v.matched).count()
     }
 
+    /// Applies a 3×3 majority filter on the `matched` flag: each block is
+    /// re-classified as matched iff the majority of its 3×3 neighborhood
+    /// (including itself) is matched. Useful to suppress isolated false
+    /// positives caused by anti-aliasing flips, and to fill 1-block holes
+    /// inside a genuine diff region. Leaves `cost`/`dx`/`dy` unchanged.
+    pub fn smooth_matched(&mut self) {
+        let cols = self.cols as i32;
+        let rows = self.rows as i32;
+        let original: Vec<bool> = self.vectors.iter().map(|v| v.matched).collect();
+        for y in 0..rows {
+            for x in 0..cols {
+                let mut matched_count = 0i32;
+                let mut total = 0i32;
+                for dy in -1..=1 {
+                    for dx in -1..=1 {
+                        let nx = x + dx;
+                        let ny = y + dy;
+                        if nx < 0 || nx >= cols || ny < 0 || ny >= rows {
+                            continue;
+                        }
+                        total += 1;
+                        if original[(ny * cols + nx) as usize] {
+                            matched_count += 1;
+                        }
+                    }
+                }
+                let i = (y * cols + x) as usize;
+                self.vectors[i].matched = matched_count * 2 > total;
+            }
+        }
+    }
+
     /// Groups spatially adjacent unmatched blocks into bounding rectangles
-    /// using 4-connected flood fill (with optional dilation to merge clusters
-    /// separated by `merge_gap` empty blocks).
+    /// using 8-connected flood fill (orthogonal + diagonal neighbors). An
+    /// optional `merge_gap` dilation merges clusters separated by up to that
+    /// many matched blocks, and the final bounding box spans the min/max
+    /// `(col, row)` of every original unmatched block in the cluster.
     ///
     /// `min_blocks` discards tiny clusters (helps suppress isolated
     /// false-positives on anti-aliased edges).
@@ -176,9 +210,16 @@ impl BlockMatchResult {
                         if cy < min_y { min_y = cy; }
                         if cy > max_y { max_y = cy; }
                     }
-                    for (nx, ny) in [(cx - 1, cy), (cx + 1, cy), (cx, cy - 1), (cx, cy + 1)] {
-                        if nx >= 0 && nx < cols && ny >= 0 && ny < rows {
-                            stack.push((nx, ny));
+                    for dy in -1..=1i32 {
+                        for dx in -1..=1i32 {
+                            if dx == 0 && dy == 0 {
+                                continue;
+                            }
+                            let nx = cx + dx;
+                            let ny = cy + dy;
+                            if nx >= 0 && nx < cols && ny >= 0 && ny < rows {
+                                stack.push((nx, ny));
+                            }
                         }
                     }
                 }
@@ -551,6 +592,44 @@ mod tests {
 
     fn solid(w: u32, h: u32, c: [u8; 4]) -> RgbaImage {
         RgbaImage::from_pixel(w, h, Rgba(c))
+    }
+
+    #[test]
+    fn smooth_matched_removes_isolated_unmatched() {
+        let img = solid(64, 64, [255, 255, 255, 255]);
+        let opts = BlockMatchOptions {
+            block_size: 8,
+            ..Default::default()
+        };
+        let mut result = diff(&img, &img, &opts);
+        // One isolated unmatched block in the middle of a matched field.
+        let i = (3 * result.cols + 3) as usize;
+        result.vectors[i].matched = false;
+        assert_eq!(result.unmatched(), 1);
+        result.smooth_matched();
+        assert_eq!(result.unmatched(), 0, "isolated unmatched should be smoothed out");
+    }
+
+    #[test]
+    fn smooth_matched_keeps_genuine_cluster() {
+        let img = solid(64, 64, [255, 255, 255, 255]);
+        let opts = BlockMatchOptions {
+            block_size: 8,
+            ..Default::default()
+        };
+        let mut result = diff(&img, &img, &opts);
+        // A 3x3 unmatched cluster.
+        for y in 2..5 {
+            for x in 2..5 {
+                let i = (y * result.cols + x) as usize;
+                result.vectors[i].matched = false;
+            }
+        }
+        assert_eq!(result.unmatched(), 9);
+        result.smooth_matched();
+        // The center stays unmatched (5 of 9 neighbors are unmatched).
+        let center = (3 * result.cols + 3) as usize;
+        assert!(!result.vectors[center].matched);
     }
 
     #[test]
