@@ -7,14 +7,29 @@ license = "MIT"
 repository = "https://github.com/bokuweb/img-block-match-rs"
 readme = "README.md"
 
+[lib]
+crate-type = ["cdylib", "rlib"]
+
 [dependencies]
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 rayon = "1.10"
 clap = { version = "4.5", features = ["derive"], optional = true }
+wasm-bindgen = { version = "0.2", optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }
+serde-wasm-bindgen = { version = "0.6", optional = true }
+console_error_panic_hook = { version = "0.1", optional = true }
 
 [features]
 default = ["cli"]
 cli = ["dep:clap"]
+wasm = [
+    "dep:wasm-bindgen",
+    "dep:serde",
+    "dep:serde_json",
+    "dep:serde-wasm-bindgen",
+    "dep:console_error_panic_hook",
+]
 
 [[bin]]
 name = "img-block-match"

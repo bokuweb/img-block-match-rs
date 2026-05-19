@@ -16,6 +16,9 @@ pub mod block_match;
 pub mod pyramid;
 pub mod render;
 
+#[cfg(feature = "wasm")]
+pub mod wasm_api;
+
 pub use block_match::{
     diff, diff_bidirectional, BidirectionalDiff, BlockMatchOptions, BlockMatchResult,
     MotionVector, Region, SearchMode,

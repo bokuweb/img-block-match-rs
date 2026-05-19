@@ -87,6 +87,55 @@ cargo run --release -- assets/before.png assets/after.png \
     -o assets/diff-block-match.png
 ```
 
+## JavaScript / WebAssembly
+
+A `wasm-bindgen` wrapper is available behind the `wasm` cargo feature.
+Build Node and Web bundles in one shot:
+
+```sh
+./scripts/build-wasm.sh
+# outputs pkg-node/ and pkg-web/
+```
+
+```js
+// node
+import { diffPng } from './pkg-node/img_block_match.js';
+const ref = new Uint8Array(fs.readFileSync('before.png'));
+const tgt = new Uint8Array(fs.readFileSync('after.png'));
+
+const r = diffPng(ref, tgt, {
+  blockSize: 8, searchX: 16, searchY: 80, threshold: 8,
+  mergeGap: 2, minBlocks: 2,
+});
+// {
+//   verdict: 'review',
+//   width, height, block_size,
+//   removed: [{x, y, width, height, blocks}, ...],
+//   added:   [{x, y, width, height, blocks}, ...],
+// }
+```
+
+```js
+// browser
+import init, { diffPng } from './pkg-web/img_block_match.js';
+await init();
+const result = diffPng(refBytes, tgtBytes, { /* ... */ });
+```
+
+Smoke test against the bundled samples:
+
+```sh
+node scripts/test-wasm.mjs
+# [menu change] menu-before.png vs menu-after.png  (7.58 ms)
+#   verdict: review
+#   removed: [{"x":80,"y":72,"width":48,"height":16,"blocks":10}]
+#   added:   [{"x":72,"y":72,"width":64,"height":16,"blocks":14},
+#             {"x":16,"y":280,"width":72,"height":16,"blocks":14}]
+```
+
+The WASM bundle is ~416 KB (post `wasm-opt`) and decodes PNGs internally
+so callers only need to pass byte arrays.
+
 ## Library
 
 ```rust
