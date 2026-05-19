@@ -75,45 +75,65 @@ Build Node and Web bundles in one shot:
 ./scripts/build-wasm.sh   # outputs pkg-node/ and pkg-web/
 ```
 
+Two JS entry points:
+
+- `diffPng(refBytes, tgtBytes, opts?)` — accepts PNG/JPEG byte arrays and
+  decodes them inside WASM. Convenient when you already have the file
+  contents in hand.
+- `diffRgba(refData, refW, refH, tgtData, tgtW, tgtH, opts?)` — accepts
+  raw RGBA8 buffers (e.g. `ImageData.data` from a `<canvas>`). Skips the
+  PNG roundtrip entirely; ~35× faster cold start in the smoke test.
+
 ```js
-// node
+// node — PNG bytes
 import { diffPng } from './pkg-node/img_block_match.js';
 
 const ref = new Uint8Array(fs.readFileSync('before.png'));
 const tgt = new Uint8Array(fs.readFileSync('after.png'));
-
 const r = diffPng(ref, tgt, {
   blockSize: 8, searchX: 16, searchY: 80, threshold: 8,
   mergeGap: 2, minBlocks: 2,
 });
-// {
-//   verdict: 'review',
-//   width, height, block_size,
-//   removed: [{x, y, width, height, blocks}, ...],
-//   added:   [{x, y, width, height, blocks}, ...],
-// }
 ```
 
 ```js
-// browser
-import init, { diffPng } from './pkg-web/img_block_match.js';
+// browser worker — already have ImageData
+import init, { diffRgba } from './pkg-web/img_block_match.js';
 await init();
-const r = diffPng(refBytes, tgtBytes, { /* ... */ });
+
+const r = diffRgba(
+  img1.data, img1.width, img1.height,
+  img2.data, img2.width, img2.height,
+  { blockSize: 8, searchX: 16, searchY: 80, threshold: 8 },
+);
 ```
 
-The WASM bundle is ~416 KB (post `wasm-opt`) and decodes PNG/JPEG
-internally so callers only pass byte arrays. PNG decode runs inside
-WASM too, so there is no JS-side image work.
+Return shape (camelCase):
 
-Smoke test against the bundled samples:
+```ts
+{
+  verdict: 'pass' | 'review',
+  width, height, blockSize,
+  removed: Region[],         // bbox in reference, gone from target
+  added:   Region[],         // bbox in target, not in reference
+
+  // x-img-diff-js drop-in compatibility surface:
+  images: [{ width, height }, { width, height }],
+  matches: DetectMatch[][],  // currently always [] (see roadmap)
+  strayingRects: [Rect[], Rect[]],  // mirrors [removed, added]
+}
+```
+
+The WASM bundle is ~417 KB (post `wasm-opt`).
+
+Smoke test against the bundled samples (`pnpm i` once to get `pngjs`):
 
 ```sh
 $ node scripts/test-wasm.mjs
-[menu change] menu-before.png vs menu-after.png  (7.58 ms)
-  verdict: review
-  removed: [{"x":80,"y":72,"width":48,"height":16,"blocks":10}]
-  added:   [{"x":72,"y":72,"width":64,"height":16,"blocks":14},
-            {"x":16,"y":280,"width":72,"height":16,"blocks":14}]
+[diffPng menu]   (207 ms)   — cold start incl. PNG decode in WASM
+[diffRgba menu]  (6 ms)     — JS-side decode, raw RGBA into WASM
+[diffPng identical] (16 ms) → verdict: pass
+PNG ↔ RGBA agree on regions: ✓
 ```
 
 ---

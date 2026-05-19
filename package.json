@@ -1,0 +1,13 @@
+{
+  "private": true,
+  "name": "img-block-match-dev",
+  "description": "Dev dependencies for the WASM smoke test in scripts/test-wasm.mjs. Not the published npm package — the published artifact is wasm-pack's pkg-node/ or pkg-web/ output.",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "test:wasm": "node scripts/test-wasm.mjs"
+  },
+  "devDependencies": {
+    "pngjs": "^7.0.0"
+  }
+}
