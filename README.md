@@ -251,6 +251,29 @@ End-to-end speedup on a 1920×1080 synthetic reflow workload:
 - `threshold`: per-channel per-pixel SAD allowed inside a matched block. 0 =
   pixel-perfect match required; 4–16 tolerates anti-aliasing differences.
 
+## Integration sketch: visual regression pass/review
+
+A common screenshot-regression workflow is "PASS unless content changed,
+otherwise FAIL and show me the diff". Pixel diffs fail this even when only
+the layout reflowed. Block-matching short-circuits that:
+
+```
+$ cargo run --release --example regression_check -- assets/menu-before.png assets/menu-before.png
+PASS  (... decided in 6 ms)
+
+$ cargo run --release --example regression_check -- assets/menu-before.png assets/menu-after.png
+REVIEW
+  removed regions: 1
+  added regions:   2
+    - removed 48x16 at (80, 72)
+    + added   64x16 at (72, 72)
+    + added   64x16 at (24, 280)
+```
+
+[examples/regression_check.rs](examples/regression_check.rs) is a 60-line
+template — drop it next to a per-pixel differ to take the slow path only on
+the unmatched-region bounding boxes, not the whole image.
+
 ## License
 
 MIT
