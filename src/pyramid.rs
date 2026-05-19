@@ -68,7 +68,7 @@ pub fn diff_pyramid(
     let cols = width / block_size;
     let rows = height / block_size;
     let threshold_total =
-        (block_size as u64) * (block_size as u64) * 3 * opts.threshold as u64;
+        (block_size as u64) * (block_size as u64) * 4 * opts.threshold as u64;
 
     let coarse_ref = &coarse;
     let vectors: Vec<MotionVector> = (0..rows)

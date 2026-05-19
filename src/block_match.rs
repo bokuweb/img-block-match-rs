@@ -265,6 +265,64 @@ fn dilate(mask: &[bool], cols: u32, rows: u32, radius: u32) -> Vec<bool> {
     out
 }
 
+/// Sum-of-absolute-differences over two byte slices of identical length.
+/// On x86_64 (always has SSE2 in the SysV ABI baseline) uses
+/// `_mm_sad_epu8` which computes 16-byte SAD in one instruction. Falls back
+/// to a scalar loop elsewhere.
+///
+/// NB: includes ALL bytes of the slice. Callers pass RGBA rows so alpha
+/// participates in the SAD; for screenshots alpha is essentially constant
+/// (255) so this doesn't perturb relative comparisons and is much faster
+/// than masking it out.
+#[inline]
+fn sad_row(a: &[u8], b: &[u8]) -> u64 {
+    debug_assert_eq!(a.len(), b.len());
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        sad_row_sse2(a, b)
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        sad_row_scalar(a, b)
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse2")]
+unsafe fn sad_row_sse2(a: &[u8], b: &[u8]) -> u64 {
+    use std::arch::x86_64::{
+        _mm_add_epi64, _mm_cvtsi128_si64, _mm_loadu_si128, _mm_sad_epu8, _mm_setzero_si128,
+        _mm_unpackhi_epi64,
+    };
+    let len = a.len();
+    let mut acc = _mm_setzero_si128();
+    let mut i = 0;
+    while i + 16 <= len {
+        let av = _mm_loadu_si128(a.as_ptr().add(i) as *const _);
+        let bv = _mm_loadu_si128(b.as_ptr().add(i) as *const _);
+        let s = _mm_sad_epu8(av, bv);
+        acc = _mm_add_epi64(acc, s);
+        i += 16;
+    }
+    let lo = _mm_cvtsi128_si64(acc) as u64;
+    let hi = _mm_cvtsi128_si64(_mm_unpackhi_epi64(acc, acc)) as u64;
+    let mut sum = lo + hi;
+    while i < len {
+        sum += (a[i] as i32 - b[i] as i32).unsigned_abs() as u64;
+        i += 1;
+    }
+    sum
+}
+
+#[allow(dead_code)]
+fn sad_row_scalar(a: &[u8], b: &[u8]) -> u64 {
+    let mut sum = 0u64;
+    for i in 0..a.len() {
+        sum += (a[i] as i32 - b[i] as i32).unsigned_abs() as u64;
+    }
+    sum
+}
+
 #[inline]
 fn sad_block(
     reference: &RgbaImage,
@@ -288,18 +346,12 @@ fn sad_block(
     let r_stride = reference.width() as usize * 4;
     let t_stride = target.width() as usize * 4;
 
+    let row_bytes = block_size as usize * 4;
     let mut sum: u64 = 0;
     for j in 0..block_size as usize {
         let r_row = (ry as usize + j) * r_stride + rx as usize * 4;
         let t_row = (ty as usize + j) * t_stride + tx as usize * 4;
-        for i in 0..block_size as usize {
-            let r_off = r_row + i * 4;
-            let t_off = t_row + i * 4;
-            let dr = (r_buf[r_off] as i32 - t_buf[t_off] as i32).unsigned_abs() as u64;
-            let dg = (r_buf[r_off + 1] as i32 - t_buf[t_off + 1] as i32).unsigned_abs() as u64;
-            let db = (r_buf[r_off + 2] as i32 - t_buf[t_off + 2] as i32).unsigned_abs() as u64;
-            sum += dr + dg + db;
-        }
+        sum += sad_row(&r_buf[r_row..r_row + row_bytes], &t_buf[t_row..t_row + row_bytes]);
         // Early-out: this row strictly exceeds the cutoff. Strict so that
         // ties (equal-cost candidates at spatially distant locations) still
         // run to completion and reach the second-best tracker.
@@ -321,8 +373,11 @@ pub fn diff(
     let cols = width / block_size;
     let rows = height / block_size;
 
+    // 4 channels because the SAD inner loop is SIMD-accelerated and
+    // includes alpha (typically constant 255 in screenshots, so this is
+    // free; for transparent overlays callers may need to bump `threshold`).
     let threshold_total =
-        (block_size as u64) * (block_size as u64) * 3 * opts.threshold as u64;
+        (block_size as u64) * (block_size as u64) * 4 * opts.threshold as u64;
     let step = opts.step.max(1) as i32;
     let search_x = opts.search_x.max(0);
     let search_y = opts.search_y.max(0);

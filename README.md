@@ -176,16 +176,18 @@ prediction at full resolution in a tiny `±refine_radius` window:
 let result = img_block_match::diff_pyramid(&a, &b, &opts, 4, 8);
 ```
 
-Helps most when the search window is wide relative to the image. Synthetic
-benchmark (1920×1080, block 16):
+Helps most when the search window is wide relative to the image AND
+single-pass already takes hundreds of milliseconds. Synthetic benchmark
+(1920×1080, block 16, with SSE2):
 
-| search ±x/±y | single-pass | pyramid (4× + ±8) | speedup |
-|---:|---:|---:|---:|
-| 64 / 96  | 255 ms | 178 ms | 1.4× |
-| 200 / 300 | 3.78 s | 763 ms | **5.0×** |
+| search ±x/±y | single-pass | pyramid (4× + ±8) |
+|---:|---:|---:|
+| 64 / 96   |  27 ms |  226 ms |
+| 200 / 300 | 765 ms | **400 ms** |
 
-For more typical small search windows or when single-pass is already
-sub-100ms, the resize overhead can dominate — measure your workload.
+With SIMD-accelerated single-pass the pyramid's resize overhead dominates
+in most cases — only reach for it when the search window is large enough
+that the single-pass matcher is the bottleneck.
 
 ## Block-level post-processing
 
@@ -225,19 +227,17 @@ expect a 2–6× slowdown depending on mode.
 | `fast` | coarse uniform grid scan (stride ≈ search/8, capped at `block_size`) + 3×3 logarithmic refinement halving down to stride 1 | large search radii, real screenshots |
 
 Benchmark on the 480×320 demo above (8×8 blocks, 2400 blocks total, 8-core
-laptop, bidirectional):
+laptop, bidirectional, with SSE2 SAD on x86_64):
 
-| search radius | mode | added blocks | elapsed |
-|---:|---|---:|---:|
-| ±96  | full | 15 | 1280 ms |
-| ±96  | fast | 15 |  16 ms |
-| ±200 | full | 15 | 3146 ms |
-| ±200 | fast | 15 |  44 ms |
+| input | mode | search | elapsed |
+|---|---|---:|---:|
+| menu screenshot (360×512) | fast | ±16 / ±80 | **1.7 ms** |
+| synthetic demo | fast | ±96 / ±96 | 5 ms |
+| synthetic demo | full | ±96 / ±96 | 1.1 s |
 
-The fast mode finds the same matches up to ~70–100× faster across both
-ranges. (The coarse stride is capped at `block_size` precisely so the
-refinement basins overlap and no in-window match is missed for typical
-inputs.)
+The SAD inner loop uses `_mm_sad_epu8` (16-byte block SAD per instruction)
+on x86_64 and falls back to a scalar implementation elsewhere — typically a
+3–20× speedup on the fast path.
 
 ## Tuning
 
