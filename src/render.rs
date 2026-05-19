@@ -107,8 +107,9 @@ pub enum HighlightStyle {
     /// wide). Underlying content stays visible — recommended for review
     /// workflows.
     Outline { stroke: u32 },
-    /// Fill the region's bounding box with the highlight color (no
-    /// transparency). High visibility but obscures content.
+    /// Fill the region's bounding box with the highlight color blended at
+    /// ~40 % opacity. Strong visual cue while still letting the underlying
+    /// content show through.
     Filled,
 }
 
@@ -159,6 +160,20 @@ pub fn render_diff(
     out
 }
 
+/// Alpha used for the `Filled` style — ~40 % so underlying content stays
+/// legible. Outline stays fully opaque so the boundary is crisp.
+const FILLED_ALPHA: u8 = 102;
+
+#[inline]
+fn blend_pixel(img: &mut RgbaImage, x: u32, y: u32, color: [u8; 3], alpha: u8) {
+    let a = alpha as u16;
+    let inv = 255u16 - a;
+    let px = img.get_pixel_mut(x, y);
+    px.0[0] = ((color[0] as u16 * a + px.0[0] as u16 * inv) / 255) as u8;
+    px.0[1] = ((color[1] as u16 * a + px.0[1] as u16 * inv) / 255) as u8;
+    px.0[2] = ((color[2] as u16 * a + px.0[2] as u16 * inv) / 255) as u8;
+}
+
 fn paint_regions(
     img: &mut RgbaImage,
     regions: &[Region],
@@ -166,7 +181,7 @@ fn paint_regions(
     style: HighlightStyle,
 ) {
     let (w, h) = (img.width(), img.height());
-    let c = Rgba([color[0], color[1], color[2], 255]);
+    let solid = Rgba([color[0], color[1], color[2], 255]);
     for r in regions {
         let x1 = r.x.min(w);
         let y1 = r.y.min(h);
@@ -179,7 +194,7 @@ fn paint_regions(
             HighlightStyle::Filled => {
                 for y in y1..y2 {
                     for x in x1..x2 {
-                        img.put_pixel(x, y, c);
+                        blend_pixel(img, x, y, color, FILLED_ALPHA);
                     }
                 }
             }
@@ -188,12 +203,12 @@ fn paint_regions(
                 // Top + bottom bands.
                 for y in y1..(y1 + s).min(y2) {
                     for x in x1..x2 {
-                        img.put_pixel(x, y, c);
+                        img.put_pixel(x, y, solid);
                     }
                 }
                 for y in y2.saturating_sub(s).max(y1)..y2 {
                     for x in x1..x2 {
-                        img.put_pixel(x, y, c);
+                        img.put_pixel(x, y, solid);
                     }
                 }
                 // Left + right bands (skip rows already drawn above).
@@ -201,10 +216,10 @@ fn paint_regions(
                 let inner_y2 = y2.saturating_sub(s).max(inner_y1);
                 for y in inner_y1..inner_y2 {
                     for x in x1..(x1 + s).min(x2) {
-                        img.put_pixel(x, y, c);
+                        img.put_pixel(x, y, solid);
                     }
                     for x in x2.saturating_sub(s).max(x1)..x2 {
-                        img.put_pixel(x, y, c);
+                        img.put_pixel(x, y, solid);
                     }
                 }
             }
