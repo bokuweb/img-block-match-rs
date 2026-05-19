@@ -166,7 +166,7 @@ $ img-block-match assets/menu-before.png assets/menu-after.png \
 
 ![regions](assets/diff-menu-regions.png)
 
-## Pyramid mode (for very large images)
+## Pyramid mode (experimental)
 
 `diff_pyramid(reference, target, opts, coarse_scale, refine_radius)` runs
 the matcher at a downscaled level first, then refines each per-block
@@ -176,18 +176,11 @@ prediction at full resolution in a tiny `±refine_radius` window:
 let result = img_block_match::diff_pyramid(&a, &b, &opts, 4, 8);
 ```
 
-Helps most when the search window is wide relative to the image AND
-single-pass already takes hundreds of milliseconds. Synthetic benchmark
-(1920×1080, block 16, with SSE2):
-
-| search ±x/±y | single-pass | pyramid (4× + ±8) |
-|---:|---:|---:|
-| 64 / 96   |  27 ms |  226 ms |
-| 200 / 300 | 765 ms | **400 ms** |
-
-With SIMD-accelerated single-pass the pyramid's resize overhead dominates
-in most cases — only reach for it when the search window is large enough
-that the single-pass matcher is the bottleneck.
+With SIMD-accelerated single-pass matching the resize overhead usually
+dominates, so the pyramid path is only worth it for niche workloads where
+the search window must be a very large fraction of the image. Benchmark
+your scenario before adopting it; for everyday use prefer `diff` /
+`diff_bidirectional` with `SearchMode::Hierarchical`.
 
 ## Block-level post-processing
 
@@ -235,9 +228,16 @@ laptop, bidirectional, with SSE2 SAD on x86_64):
 | synthetic demo | fast | ±96 / ±96 | 5 ms |
 | synthetic demo | full | ±96 / ±96 | 1.1 s |
 
-The SAD inner loop uses `_mm_sad_epu8` (16-byte block SAD per instruction)
-on x86_64 and falls back to a scalar implementation elsewhere — typically a
-3–20× speedup on the fast path.
+The SAD inner loop uses explicit SIMD: `_mm_sad_epu8` on x86_64 (SSE2) and
+`vabdq_u8`/`vaddlvq_u8` on aarch64 (NEON). Scalar fallback elsewhere.
+
+End-to-end speedup on a 1920×1080 synthetic reflow workload:
+
+| search ±x/±y | scalar / auto-vec | NEON intrinsics |
+|---:|---:|---:|
+| 64 / 96  | 255 ms |  20 ms (**~12×**) |
+| 200 / 300 | 3.78 s | 183 ms (**~21×**) |
+| 4K, 200 / 400 | 1.14 s |  57 ms (**~20×**) |
 
 ## Tuning
 

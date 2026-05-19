@@ -266,9 +266,9 @@ fn dilate(mask: &[bool], cols: u32, rows: u32, radius: u32) -> Vec<bool> {
 }
 
 /// Sum-of-absolute-differences over two byte slices of identical length.
-/// On x86_64 (always has SSE2 in the SysV ABI baseline) uses
-/// `_mm_sad_epu8` which computes 16-byte SAD in one instruction. Falls back
-/// to a scalar loop elsewhere.
+/// Uses explicit SIMD intrinsics on x86_64 (SSE2) and aarch64 (NEON); falls
+/// back to a scalar loop that LLVM typically auto-vectorizes on other
+/// targets.
 ///
 /// NB: includes ALL bytes of the slice. Callers pass RGBA rows so alpha
 /// participates in the SAD; for screenshots alpha is essentially constant
@@ -279,12 +279,14 @@ fn sad_row(a: &[u8], b: &[u8]) -> u64 {
     debug_assert_eq!(a.len(), b.len());
     #[cfg(target_arch = "x86_64")]
     unsafe {
-        sad_row_sse2(a, b)
+        return sad_row_sse2(a, b);
     }
-    #[cfg(not(target_arch = "x86_64"))]
-    {
-        sad_row_scalar(a, b)
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        return sad_row_neon(a, b);
     }
+    #[allow(unreachable_code)]
+    sad_row_scalar(a, b)
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -307,6 +309,27 @@ unsafe fn sad_row_sse2(a: &[u8], b: &[u8]) -> u64 {
     let lo = _mm_cvtsi128_si64(acc) as u64;
     let hi = _mm_cvtsi128_si64(_mm_unpackhi_epi64(acc, acc)) as u64;
     let mut sum = lo + hi;
+    while i < len {
+        sum += (a[i] as i32 - b[i] as i32).unsigned_abs() as u64;
+        i += 1;
+    }
+    sum
+}
+
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn sad_row_neon(a: &[u8], b: &[u8]) -> u64 {
+    use std::arch::aarch64::{vabdq_u8, vaddlvq_u8, vld1q_u8};
+    let len = a.len();
+    let mut sum: u64 = 0;
+    let mut i = 0;
+    while i + 16 <= len {
+        let av = vld1q_u8(a.as_ptr().add(i));
+        let bv = vld1q_u8(b.as_ptr().add(i));
+        let d = vabdq_u8(av, bv);
+        sum += vaddlvq_u8(d) as u64;
+        i += 16;
+    }
     while i < len {
         sum += (a[i] as i32 - b[i] as i32).unsigned_abs() as u64;
         i += 1;
